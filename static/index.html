@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b0e14">
+  <title>TeleCourse — Seu cinema de cursos</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon">▶</span><strong>tele<span>course</span></strong></div>
+    <p class="sidebar-label">MINHA ÁREA</p>
+    <button class="nav-item active" id="nav-library">▦ <span>Biblioteca</span></button>
+    <button class="nav-item" id="nav-continue">◷ <span>Continuar estudando</span></button>
+    <div class="sidebar-bottom">
+      <div class="connection"><span class="dot" id="connection-dot"></span><span id="connection-name">Verificando Telegram...</span></div>
+      <p>Vídeos continuam no Telegram. Biblioteca e progresso ficam no seu computador.</p>
+      <div class="sidebar-actions"><button class="nav-item" id="make-backup">⇩ <span>Fazer backup</span></button><button class="nav-item" id="export-progress">↗ <span>Exportar progresso</span></button></div>
+    </div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div class="top-left"><span class="eyebrow">BIBLIOTECA PESSOAL · LOCAL</span><h1 id="main-heading">O que vamos aprender hoje?</h1></div>
+      <button class="primary" id="import-open">＋ Importar aulas</button>
+    </header>
+    <div id="alert" class="alert hidden" role="alert"></div>
+    <section id="home-view">
+      <div class="hero">
+        <div class="hero-copy"><span class="hero-pill">ESTUDE NO SEU RITMO</span><h2>Seus cursos.<br><em>Na ordem certa.</em></h2><p>Transforme canais e grupos privados do Telegram em trilhas de aprendizado. Retome exatamente de onde parou.</p><button class="primary" id="hero-import">Adicionar meu primeiro curso →</button></div>
+        <div class="hero-art"><span class="floating f1">01 <small>Módulo</small></span><span class="floating f2">✓ <small>Concluído</small></span><div class="orb">▶</div><span class="floating f3">90% <small>Assistido</small></span></div>
+      </div>
+      <div class="section-heading"><h2>Continue de onde parou</h2><span id="resume-count">0 em andamento</span></div>
+      <div id="resume-grid" class="course-grid"></div>
+      <div id="library-heading" class="section-heading"><h2>Minha biblioteca</h2><span id="course-count">0 cursos</span></div>
+      <div class="search-box"><input id="course-search" type="search" autocomplete="off" placeholder="Buscar cursos na biblioteca…" aria-label="Buscar cursos"></div>
+      <div id="courses-grid" class="course-grid"></div>
+    </section>
+    <section id="course-view" class="hidden">
+      <button id="back-to-library" class="back">← Voltar à biblioteca</button>
+      <div class="course-header">
+        <div><span class="eyebrow">MINHA TRILHA</span><h2 id="course-title"></h2><p id="course-description"></p><div class="inline-tools"><button class="link-button" id="edit-course">Editar curso</button><button class="link-button" id="add-module">+ Novo módulo</button><button class="link-button" id="import-into-course">+ Importar mais aulas</button><button class="link-button danger" id="delete-course">Excluir da biblioteca</button></div></div>
+        <div class="course-progress"><strong id="course-progress-pct">0%</strong><span>concluído</span><div class="progress-track"><div id="course-progress-fill" class="progress-fill"></div></div></div>
+      </div>
+      <div class="learning-layout">
+        <div class="watch-pane">
+          <div id="media-container" class="video-shell"><div class="player-empty"><span>▶</span><p>Selecione uma aula</p></div></div>
+          <div class="watch-meta"><span id="now-playing-type" class="eyebrow">ASSISTINDO AGORA</span><h3 id="now-playing-title">Selecione uma aula</h3>
+            <div class="watch-actions"><button class="secondary" id="mark-done">✓ Marcar concluída</button><button class="secondary" id="next-lesson">Próxima aula →</button></div>
+          </div>
+          <p class="small-hint">O progresso é salvo localmente a cada poucos segundos. Alguns formatos precisam de conversão para MP4/H.264 para tocar no navegador.</p>
+        </div>
+        <div class="playlist-pane"><div class="playlist-header"><div><h3>Conteúdo do curso</h3><small>Arraste aulas para mudar a ordem, ou use ↑ ↓.</small></div><span id="playlist-count">0 aulas</span></div><div id="playlist"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="import-dialog" class="modal wizard">
+    <div class="modal-head"><div><span class="eyebrow">ASSISTENTE DE IMPORTAÇÃO</span><h2 id="wizard-title">Escolher origem</h2></div><button type="button" class="icon-btn" id="close-modal" aria-label="Fechar">✕</button></div>
+    <div class="wizard-steps"><span id="step-one" class="step active">1 · Canal</span><span id="step-two" class="step">2 · Revisão</span></div>
+    <section id="wizard-source">
+      <p>Conecte-se à sua própria conta no terminal e escolha um canal ou grupo. Só analisamos metadados; os vídeos não serão baixados durante a importação.</p>
+      <form id="scan-form">
+        <label for="chat-select">Canal ou grupo privado</label><select id="chat-select" required><option value="">Carregando conversas...</option></select>
+        <label for="scan-limit">Mensagens recentes para analisar</label><input type="number" id="scan-limit" value="600" min="1" max="3000" required>
+        <details><summary>Opcional: limitar intervalo de mensagens</summary><div class="range-inputs"><div><label for="msg-from">ID inicial</label><input type="number" id="msg-from" min="1" placeholder="Ex.: 100"></div><div><label for="msg-to">ID final</label><input type="number" id="msg-to" min="1" placeholder="Ex.: 850"></div></div></details>
+        <div class="modal-actions"><button type="button" class="secondary cancel-import">Cancelar</button><button type="submit" id="scan-button" class="primary">Analisar mensagens →</button></div>
+      </form>
+    </section>
+    <section id="wizard-review" class="hidden">
+      <div class="import-stats" id="import-stats"></div>
+      <label for="course-target">Adicionar conteúdo a</label><select id="course-target"><option value="new">✦ Novo curso</option></select>
+      <div id="new-course-name"><label for="new-course-title">Nome do novo curso</label><input id="new-course-title" maxlength="150" placeholder="Ex.: Pentest Web — Completo"></div>
+      <div class="import-toolbar"><label class="checkline"><input type="checkbox" id="select-all" checked> Selecionar tudo</label><span>Edite nomes e módulos antes de salvar</span></div>
+      <div id="preview-items" class="preview-items"></div>
+      <div class="modal-actions"><button class="secondary" id="back-to-source">← Voltar</button><button class="primary" id="confirm-import">Publicar na biblioteca</button></div>
+    </section>
+  </dialog>
+</body>
+</html>
