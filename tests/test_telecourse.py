@@ -4,7 +4,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from telecourse import settings
+from telecourse import server, settings
 from telecourse.database import initialize, connect, backup_database
 from telecourse.organizer import media_info, propose, organize
 from telecourse.server import app, range_of
@@ -15,7 +15,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'DATA_DIR', tmp_path)
     monkeypatch.setattr(settings, 'DB_PATH', tmp_path / 'telecourse.db')
     monkeypatch.setattr(settings, 'BACKUP_DIR', tmp_path / 'backups')
+    monkeypatch.setattr(settings, 'MEDIA_DIR', tmp_path / 'media')
     monkeypatch.setattr(settings, 'SESSION_PATH', tmp_path / 'telegram')
+    # Com .env preenchido o gateway global teria um cliente real; os testes nunca devem usá-lo.
+    monkeypatch.setattr(server.gateway, 'client', None)
+    server._media_cache.clear()
+    server.download_jobs.clear()
     with TestClient(app) as c:
         yield c
 
@@ -133,3 +138,149 @@ def test_range_parsing():
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as e:range_of('bytes=100-',100)
     assert e.value.status_code==416
+
+
+def test_rename_keeps_position_and_unmarking_sticks(client):
+    c=publish(client)
+    first,second=client.get(f'/api/courses/{c}').json()['modules'][0]['lessons']
+    r=client.patch(f"/api/lessons/{first['id']}",json={'title':'Renomeada','module_id':first['module_id']})
+    assert r.status_code==200
+    lessons=client.get(f'/api/courses/{c}').json()['modules'][0]['lessons']
+    assert [l['id'] for l in lessons]==[first['id'],second['id']]
+    assert lessons[0]['title']=='Renomeada'
+    url=f"/api/lessons/{first['id']}/progress"
+    for _ in range(4):
+        done=client.put(url,json={'position_seconds':100,'played_delta_seconds':30}).json()['completed']
+    assert done is True
+    assert client.put(url,json={'position_seconds':100,'completed':False}).json()['completed'] is False
+    assert client.put(url,json={'position_seconds':101,'played_delta_seconds':5}).json()['completed'] is False
+
+
+def test_cross_origin_writes_are_rejected(client):
+    assert client.post('/api/backup',headers={'origin':'http://evil.example'}).status_code==403
+    assert client.post('/api/backup',headers={'sec-fetch-site':'cross-site'}).status_code==403
+    assert client.post('/api/backup',headers={'origin':'http://testserver'}).status_code==200
+    assert client.get('/api/library',headers={'origin':'http://evil.example'}).status_code==200
+
+
+def test_stream_serves_requested_range_and_caches_message(client,monkeypatch):
+    c=publish(client)
+    lesson=client.get(f'/api/courses/{c}').json()['modules'][0]['lessons'][0]['id']
+    data=bytes(range(256))*4
+    calls=[]
+
+    class Download:
+        def __init__(self,offset,size):
+            assert offset%size==0
+            self.blocks=iter([data[offset:offset+size]] if offset<len(data) else [])
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            try:
+                return next(self.blocks)
+            except StopIteration:
+                raise StopAsyncIteration
+        async def close(self):
+            pass
+
+    class FakeTelegram:
+        async def get_messages(self,entity,ids):
+            calls.append(ids)
+            return SimpleNamespace(document=SimpleNamespace(size=len(data)),media=object(),noforwards=False)
+        def iter_download(self,media,offset,request_size,**_):
+            return Download(offset,request_size)
+
+    fake=FakeTelegram()
+    async def authorized():
+        return fake
+    async def entity(chat_id):
+        return object()
+    monkeypatch.setattr(server.gateway,'authorized',authorized)
+    monkeypatch.setattr(server.gateway,'entity',entity)
+    monkeypatch.setattr(server,'STREAM_PART',128)  # várias partes paralelas num arquivo pequeno
+    r=client.get(f'/api/lessons/{lesson}/stream',headers={'range':'bytes=10-409'})
+    assert r.status_code==206 and r.content==data[10:410]
+    assert r.headers['content-range']==f'bytes 10-409/{len(data)}'
+    assert client.get(f'/api/lessons/{lesson}/stream').content==data
+    assert calls==[42]
+
+
+def test_schema_version_is_recorded(client):
+    with connect() as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0]==1
+
+
+def test_course_hours_are_totalled(client):
+    c=publish(client)
+    course=client.get(f'/api/courses/{c}').json()
+    assert course['duration_seconds']==240 and course['watched_seconds']==0
+    assert [m['duration_seconds'] for m in course['modules']]==[240,0]
+    first,second=course['modules'][0]['lessons']
+    client.put(f"/api/lessons/{first['id']}/progress",json={'position_seconds':30,'played_delta_seconds':30})
+    client.put(f"/api/lessons/{second['id']}/progress",json={'position_seconds':0,'completed':True})
+    assert client.get(f'/api/courses/{c}').json()['watched_seconds']==150
+    entry=client.get('/api/library').json()[0]
+    assert entry['duration_seconds']==240 and entry['watched_seconds']==150
+
+
+def test_download_plays_offline_and_can_be_removed(client,monkeypatch):
+    import time
+    c=publish(client)
+    first,second=client.get(f'/api/courses/{c}').json()['modules'][0]['lessons']
+    data=bytes(range(256))*4
+    monkeypatch.setattr(server,'STREAM_PART',128)
+    monkeypatch.setattr(server,'DISK_RESERVE',0)
+
+    class Download:
+        def __init__(self,offset,size):
+            self.blocks=iter([data[offset:offset+size]] if offset<len(data) else [])
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            try:
+                return next(self.blocks)
+            except StopIteration:
+                raise StopAsyncIteration
+        async def close(self):
+            pass
+
+    class FakeTelegram:
+        async def get_messages(self,entity,ids):
+            return SimpleNamespace(document=SimpleNamespace(size=len(data)),media=object(),noforwards=ids==43)
+        def iter_download(self,media,offset,request_size,**_):
+            return Download(offset,request_size)
+
+    fake=FakeTelegram()
+    async def authorized():
+        return fake
+    async def entity(chat_id):
+        return SimpleNamespace(noforwards=False)
+    async def offline():
+        raise server.HTTPException(503,'Sem conexão')
+    monkeypatch.setattr(server.gateway,'authorized',authorized)
+    monkeypatch.setattr(server.gateway,'entity',entity)
+
+    def settle():
+        for _ in range(200):
+            jobs=client.get('/api/downloads').json()['jobs']
+            if all(j['state']=='error' for j in jobs.values()):
+                return jobs
+            time.sleep(0.02)
+        raise AssertionError('download não terminou')
+
+    assert client.post(f'/api/courses/{c}/download').status_code==202
+    jobs=settle()
+    # A mensagem 43 tem salvamento restrito: fica só no streaming.
+    assert list(jobs)==[str(second['id'])] and 'restrito' in jobs[str(second['id'])]['error']
+    course=client.get(f'/api/courses/{c}').json()
+    assert course['downloaded_count']==2 and course['downloaded_bytes']==2*len(data)
+    assert client.get('/api/library').json()[0]['downloaded']==2
+    monkeypatch.setattr(server.gateway,'authorized',offline)
+    r=client.get(f"/api/lessons/{first['id']}/stream",headers={'range':'bytes=5-600'})
+    assert r.status_code==206 and r.content==data[5:601]
+    assert client.get(f"/api/lessons/{second['id']}/stream").status_code==503
+    assert client.delete(f"/api/lessons/{first['id']}/download").status_code==200
+    assert client.get(f'/api/courses/{c}').json()['downloaded_count']==1
+    assert client.delete(f'/api/courses/{c}/download').json()['failed']==0
+    assert client.get('/api/downloads').json()=={'jobs':{},'count':0,'bytes':0}
+    assert list(settings.MEDIA_DIR.iterdir())==[]

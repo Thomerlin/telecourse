@@ -13,6 +13,7 @@ TeleCourse é um projeto **open source (MIT)** voltado a uso pessoal: conecte a 
 - **Organização conservadora**: reconhece `Módulo 02 / Aula 03` e `mod02_aula03` no título ou nome do arquivo; sinaliza nomes ambíguos para revisão.
 - **Editor**: criar/renomear módulos, renomear aulas, transferir entre módulos, reordenar via arrastar/soltar ou setas.
 - **Player HTTP Range** para formatos reconhecidos pelo navegador, com carregamento por partes usando Telethon (sem baixar tudo antecipadamente).
+- **Downloads para assistir offline**: baixe uma aula, um módulo ou o curso inteiro para `data/media/`, veja o espaço usado e remova quando quiser. Aulas baixadas tocam do disco, sem internet. Conteúdo com salvamento restrito não é baixado, só reproduzido por streaming.
 - **Progresso no SQLite**: posição da reprodução, tempo assistido e concluído/desmarcado, salvos durante a reprodução.
 - **Backup** por SQLite online backup, restauração com o servidor parado e exportação de progresso para JSON.
 - **Segurança básica**: bind somente em `127.0.0.1`, proteção de Host, CSP e dados privados excluídos do controle de versão.
@@ -123,7 +124,7 @@ A integração com Telegram **não faz parte** dos testes offline e precisa de t
 ## Limitações conhecidas
 
 - Streaming direto depende de formato de vídeo compatível com o navegador (preferencialmente MP4/H.264/AAC). MKV, codecs não suportados e alguns arquivos com metadados no fim podem não tocar sem remux/conversão local — **conversão não está incluída**.
-- Algumas restrições de mídia/canais protegidos são respeitadas; o aplicativo não contorna DRM ou restrições de cópia.
+- Por padrão, canais e mensagens com "restringir salvamento de conteúdo" ficam bloqueados. Definir `TELECOURSE_ALLOW_PROTECTED=1` no `.env` libera a reprodução deles para a sua conta; a responsabilidade pelo uso é sua — respeite os direitos de quem publicou. O aplicativo não contorna DRM.
 - Não há sincronização automática em segundo plano nem cliente Android/TV nativos; novas aulas são importadas por novas varreduras manuais.
 - Sem busca profunda em todos os canais: a listagem inicial cobre até 500 conversas. Vídeos/cursos grandes podem esbarrar em limites ou pausas da API Telegram.
 - O programa é **single-user e loopback-only**. Não abra porta em interfaces públicas nem use port forwarding. Acesso remoto exigiria autenticação e outra análise de segurança.

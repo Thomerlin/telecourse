@@ -6,14 +6,18 @@ Use `python run.py` (host 127.0.0.1 fixo).
 import asyncio
 import math
 import re
+import shutil
 import sqlite3
+import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -38,7 +42,13 @@ async def lifespan(_app):
         await gateway.connect()
     except (OSError, TimeoutError, ConnectionError):
         pass  # Biblioteca local pode abrir sem conexão, conteúdo depende do Telegram.
+    global _download_slots
+    _download_slots = asyncio.Semaphore(1)  # um download por vez, para não disputar banda com o player
     yield
+    pending = list(_download_tasks.values())
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
     await gateway.disconnect()
 
 
@@ -48,7 +58,14 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost
 
 @app.middleware('http')
 async def security_headers(request, call_next):
-    response = await call_next(request)
+    # Escritas só são aceitas da própria interface: bloqueia CSRF vindo de outros sites/portas.
+    origin = request.headers.get('origin')
+    cross_origin = bool(origin) and urlsplit(origin).netloc != request.headers.get('host', '')
+    if request.method not in ('GET', 'HEAD', 'OPTIONS') and (
+            cross_origin or request.headers.get('sec-fetch-site') == 'cross-site'):
+        response = JSONResponse({'detail': 'Origem não permitida'}, status_code=403)
+    else:
+        response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
@@ -79,16 +96,19 @@ async def status():
     configured = bool(gateway.client)
     connected = False
     label = ''
+    message = 'Configure .env e execute python login.py'
     if configured:
         try:
+            await gateway.ensure_connected()
             connected = bool(await gateway.client.is_user_authorized())
             if connected:
                 profile = await gateway.client.get_me()
                 label = getattr(profile, 'first_name', '') or 'Telegram'
-        except (OSError, ConnectionError, RuntimeError, RPCError):
-            pass
+                message = 'Conectado'
+        except (OSError, ConnectionError, RuntimeError, RPCError, HTTPException):
+            message = 'Sem internet — só aulas baixadas'
     return {'configured': configured, 'ready': connected, 'name': label,
-            'message': 'Conectado' if connected else 'Configure .env e execute python login.py',
+            'message': message,
             'version': __version__}
 
 
@@ -135,14 +155,17 @@ async def preview_import(payload: PreviewRequest):
     kind = 'Canal' if getattr(entity, 'broadcast', False) else 'Grupo'
     candidates = []
     scanned = 0
+    # O intervalo é aplicado pelo Telegram (limites exclusivos), então o limite conta
+    # mensagens dentro do intervalo, e não apenas as mais recentes da conversa.
+    bounds = {}
+    if payload.from_id is not None:
+        bounds['min_id'] = payload.from_id - 1
+    if payload.to_id is not None:
+        bounds['max_id'] = payload.to_id + 1
     try:
-        async for message in tg.iter_messages(entity, limit=payload.limit):
+        async for message in tg.iter_messages(entity, limit=payload.limit, **bounds):
             scanned += 1
-            if getattr(message, 'noforwards', False):
-                continue
-            if payload.from_id is not None and message.id < payload.from_id:
-                continue
-            if payload.to_id is not None and message.id > payload.to_id:
+            if not settings.ALLOW_PROTECTED and getattr(message, 'noforwards', False):
                 continue
             media = media_info(message)
             if media:
@@ -257,6 +280,8 @@ def library():
     with connect() as db:
         rows = db.execute('''SELECT c.id,c.title,c.description,c.updated_at,
             COUNT(l.id) AS total,COALESCE(SUM(p.completed),0) AS completed,
+            COALESCE(SUM(l.duration),0) AS duration_seconds,
+            COALESCE(SUM(CASE WHEN p.completed=1 THEN l.duration ELSE COALESCE(p.played_seconds,0) END),0) AS watched_seconds,
             COALESCE(SUM(CASE WHEN p.played_seconds>0 OR p.position_seconds>0 THEN 1 ELSE 0 END),0) AS started,
             (SELECT l2.id FROM lessons l2 JOIN progress p2 ON p2.lesson_id=l2.id
              WHERE l2.course_id=c.id AND l2.hidden=0 AND p2.completed=0
@@ -264,7 +289,16 @@ def library():
             FROM courses c LEFT JOIN lessons l ON l.course_id=c.id AND l.hidden=0
             LEFT JOIN progress p ON p.lesson_id=l.id
             GROUP BY c.id ORDER BY c.updated_at DESC,c.id DESC''').fetchall()
-        return [dict(r) for r in rows]
+        sizes = downloaded_sizes()
+        owners = {r['id']: r['course_id'] for r in db.execute('SELECT id,course_id FROM lessons WHERE hidden=0')} if sizes else {}
+    courses = [dict(r, downloaded=0, downloaded_bytes=0) for r in rows]
+    by_id = {course['id']: course for course in courses}
+    for lesson_id, size in sizes.items():
+        course = by_id.get(owners.get(lesson_id))
+        if course:
+            course['downloaded'] += 1
+            course['downloaded_bytes'] += size
+    return courses
 
 
 @app.get('/api/courses/{course_id}')
@@ -281,9 +315,19 @@ def get_course(course_id: int):
             WHERE l.course_id=? AND l.hidden=0 ORDER BY l.sort_order,l.id''', (course_id,))]
         sources = [dict(r) for r in db.execute('''SELECT s.id,s.title,s.chat_id,s.kind FROM sources s
             JOIN course_sources cs ON cs.source_id=s.id WHERE cs.course_id=? ORDER BY s.id''', (course_id,))]
+    sizes = downloaded_sizes()
+    for lesson in lessons:
+        lesson['downloaded'] = lesson['id'] in sizes
+        lesson['local_bytes'] = sizes.get(lesson['id'], 0)
     for mod in mods:
         mod['lessons'] = [lesson for lesson in lessons if lesson['module_id'] == mod['id']]
+        mod['duration_seconds'] = sum(lesson['duration'] for lesson in mod['lessons'])
+    # Aula concluída conta inteira; em andamento conta o tempo já assistido.
+    watched = sum(l['duration'] if l['completed'] else l['played_seconds'] for l in lessons)
     return {'course':dict(course), 'modules':mods, 'sources':sources,
+            'duration_seconds':sum(l['duration'] for l in lessons), 'watched_seconds':watched,
+            'downloaded_count':sum(l['downloaded'] for l in lessons),
+            'downloaded_bytes':sum(l['local_bytes'] for l in lessons),
             'total':len(lessons),'completed':sum(l['completed'] for l in lessons)}
 
 
@@ -311,9 +355,12 @@ def edit_course(course_id: int, payload: CourseEdit):
 @app.delete('/api/courses/{course_id}')
 def delete_course(course_id: int):
     with connect() as db:
+        lesson_ids = [r['id'] for r in db.execute('SELECT id FROM lessons WHERE course_id=?',(course_id,))]
         count = db.execute('DELETE FROM courses WHERE id=?',(course_id,)).rowcount
     if not count:
         raise HTTPException(404,'Curso não encontrado')
+    for lesson_id in lesson_ids:
+        discard_download(lesson_id)
     return {'ok':True,'telegram_untouched':True}
 
 
@@ -360,7 +407,7 @@ def edit_lesson(lesson_id:int,payload:LessonEdit):
         lesson = db.execute('SELECT * FROM lessons WHERE id=?',(lesson_id,)).fetchone()
         if not lesson:
             raise HTTPException(404,'Aula não encontrada')
-        if payload.module_id is not None:
+        if payload.module_id is not None and payload.module_id != lesson['module_id']:
             module = db.execute('SELECT id FROM modules WHERE id=? AND course_id=?',
                                 (payload.module_id,lesson['course_id'])).fetchone()
             if not module:
@@ -382,6 +429,7 @@ def hide_lesson(lesson_id:int):
         updated = db.execute('UPDATE lessons SET hidden=1 WHERE id=?',(lesson_id,)).rowcount
     if not updated:
         raise HTTPException(404,'Aula não encontrada')
+    discard_download(lesson_id)
     return {'ok':True,'telegram_untouched':True}
 
 
@@ -437,6 +485,8 @@ def update_progress(lesson_id:int,payload:ProgressInput):
         played = (old['played_seconds'] if old else 0) + payload.played_delta_seconds
         if duration:
             played = min(played,float(duration))
+        if payload.completed is False and old and old['completed']:
+            played = 0.0  # desmarcar zera o tempo assistido, senão a regra dos 90% remarcaria a aula
         if payload.completed is not None:
             done = int(payload.completed)
         else:
@@ -466,6 +516,131 @@ def export_progress():
     return {'version':1,'exported_at':datetime.now(timezone.utc).isoformat(),'lessons':result}
 
 
+DISK_RESERVE = 1024 ** 3  # nunca encher o disco: mantém 1 GB livre
+download_jobs = {}    # lesson_id -> {'state': queued|downloading|error, 'done', 'total', 'error'}
+_download_tasks = {}  # lesson_id -> asyncio.Task em andamento
+_download_slots = None
+
+
+def media_path(lesson_id):
+    return settings.MEDIA_DIR / f'{int(lesson_id)}.media'
+
+
+def downloaded_sizes():
+    if not settings.MEDIA_DIR.is_dir():
+        return {}
+    return {int(p.stem): p.stat().st_size for p in settings.MEDIA_DIR.glob('*.media') if p.stem.isdigit()}
+
+
+def discard_download(lesson_id):
+    """Cancela o download em andamento e apaga a cópia local. False se o arquivo está em uso."""
+    task = _download_tasks.pop(lesson_id, None)
+    download_jobs.pop(lesson_id, None)
+    if task:
+        task.cancel()  # a própria tarefa apaga o .part ao ser cancelada
+    try:
+        media_path(lesson_id).unlink(missing_ok=True)
+    except PermissionError:  # Windows: arquivo aberto pelo player
+        return False
+    return True
+
+
+async def run_download(lesson_id):
+    job = download_jobs[lesson_id]
+    partial = media_path(lesson_id).with_suffix('.part')
+    try:
+        async with _download_slots:
+            job['state'] = 'downloading'
+            tg = await gateway.authorized()
+            lesson = source_asset(lesson_id)
+            entity = await gateway.entity(lesson['chat_id'])
+            message = await tg.get_messages(entity, ids=lesson['message_id'])
+            if not message or not getattr(message, 'document', None):
+                raise HTTPException(404, 'A mensagem original não está mais acessível')
+            # Mesmo com TELECOURSE_ALLOW_PROTECTED, conteúdo com salvamento restrito só toca por streaming.
+            if getattr(entity, 'noforwards', False) or getattr(message, 'noforwards', False):
+                raise HTTPException(403, 'Canal com salvamento restrito: aula disponível só por streaming')
+            total = int(message.document.size or 0)
+            if total <= 0:
+                raise HTTPException(404, 'Mídia sem tamanho válido')
+            settings.ensure_directories()
+            if shutil.disk_usage(settings.MEDIA_DIR).free < total + DISK_RESERVE:
+                raise HTTPException(507, 'Espaço em disco insuficiente')
+            job['total'] = total
+            with open(partial, 'wb') as out:
+                async for block in telegram_bytes(tg, message, 0, total - 1, total):
+                    out.write(block)
+                    job['done'] += len(block)
+            if job['done'] != total:
+                raise HTTPException(502, 'Download incompleto; tente de novo')
+            partial.replace(media_path(lesson_id))
+            download_jobs.pop(lesson_id, None)
+    except asyncio.CancelledError:
+        partial.unlink(missing_ok=True)
+        raise
+    except HTTPException as exc:
+        partial.unlink(missing_ok=True)
+        job.update(state='error', error=str(exc.detail))
+    except (RPCError, OSError, ConnectionError) as exc:
+        partial.unlink(missing_ok=True)
+        job.update(state='error', error=f'Falha no download ({type(exc).__name__})')
+    finally:
+        if _download_tasks.get(lesson_id) is asyncio.current_task():
+            del _download_tasks[lesson_id]
+
+
+def queue_download(lesson_id):
+    if media_path(lesson_id).exists() or lesson_id in _download_tasks:
+        return False
+    download_jobs[lesson_id] = {'state': 'queued', 'done': 0, 'total': 0, 'error': ''}
+    _download_tasks[lesson_id] = asyncio.ensure_future(run_download(lesson_id))
+    return True
+
+
+@app.get('/api/downloads')
+def list_downloads():
+    sizes = downloaded_sizes()
+    return {'jobs': {str(k): v for k, v in download_jobs.items()},
+            'count': len(sizes), 'bytes': sum(sizes.values())}
+
+
+@app.post('/api/lessons/{lesson_id}/download', status_code=202)
+async def download_lesson(lesson_id: int):
+    source_asset(lesson_id)
+    await gateway.authorized()
+    return {'queued': int(queue_download(lesson_id))}
+
+
+@app.delete('/api/lessons/{lesson_id}/download')
+async def remove_download(lesson_id: int):
+    if not discard_download(lesson_id):
+        raise HTTPException(409, 'Arquivo em uso. Pare o vídeo e tente de novo.')
+    return {'ok': True}
+
+
+def course_lesson_ids(course_id, module_id=None):
+    with connect() as db:
+        if not db.execute('SELECT 1 FROM courses WHERE id=?', (course_id,)).fetchone():
+            raise HTTPException(404, 'Curso não encontrado')
+        rows = db.execute("""SELECT l.id FROM lessons l JOIN modules m ON m.id=l.module_id
+            WHERE l.course_id=? AND l.hidden=0 AND (? IS NULL OR l.module_id=?)
+            ORDER BY m.sort_order,m.id,l.sort_order,l.id""", (course_id, module_id, module_id)).fetchall()
+    return [r['id'] for r in rows]
+
+
+@app.post('/api/courses/{course_id}/download', status_code=202)
+async def download_course(course_id: int, module_id: int | None = None):
+    lesson_ids = course_lesson_ids(course_id, module_id)
+    await gateway.authorized()
+    return {'queued': sum(queue_download(lesson_id) for lesson_id in lesson_ids)}
+
+
+@app.delete('/api/courses/{course_id}/download')
+async def remove_course_downloads(course_id: int):
+    results = [discard_download(lesson_id) for lesson_id in course_lesson_ids(course_id)]
+    return {'ok': True, 'failed': results.count(False)}
+
+
 def source_asset(lesson_id):
     lesson = row('''SELECT l.*,s.chat_id FROM lessons l JOIN sources s ON s.id=l.source_id
                     WHERE l.id=? AND l.hidden=0''',(lesson_id,))
@@ -474,9 +649,20 @@ def source_asset(lesson_id):
     return lesson
 
 
+STREAM_PART = 512 * 1024  # maior parte aceita pelo Telegram; os offsets precisam ser múltiplos dela
+STREAM_PARALLEL = 4
+MEDIA_TTL = 300 # segundos; bem abaixo da validade das referências de arquivo do Telegram
+_media_cache = {}
+
+
 async def telegram_asset(lesson_id):
     tg = await gateway.authorized()
     lesson = source_asset(lesson_id)
+    # O player faz muitas requisições Range por aula; sem cache cada uma custaria uma RPC.
+    key = (lesson['chat_id'], lesson['message_id'])
+    cached = _media_cache.get(lesson_id)
+    if cached and cached[0] > time.monotonic() and cached[1] == key:
+        return tg, cached[2], lesson
     entity = await gateway.entity(lesson['chat_id'])
     try:
         message = await tg.get_messages(entity,ids=lesson['message_id'])
@@ -484,8 +670,11 @@ async def telegram_asset(lesson_id):
         raise HTTPException(502,'Não foi possível buscar a mídia no Telegram') from exc
     if not message or not getattr(message,'document',None):
         raise HTTPException(404,'A mensagem original não está mais acessível')
-    if getattr(message,'noforwards',False):
+    if not settings.ALLOW_PROTECTED and getattr(message,'noforwards',False):
         raise HTTPException(403,'A mensagem protege seu conteúdo contra cópia')
+    if len(_media_cache) >= 64:
+        _media_cache.clear()
+    _media_cache[lesson_id] = (time.monotonic() + MEDIA_TTL, key, message)
     return tg, message, lesson
 
 
@@ -508,9 +697,60 @@ def range_of(header,total):
     return start,min(end,total-1),True
 
 
+async def telegram_bytes(tg, message, start, end, total):
+    """Bytes [start, end] da mídia. Uma requisição por vez fica abaixo do bitrate de vídeos
+    longos, então pedimos algumas partes alinhadas em paralelo e entregamos na ordem."""
+    async def part(offset):
+        stream = tg.iter_download(message.media,offset=offset,request_size=STREAM_PART,limit=1,file_size=total)
+        try:
+            async for block in stream:
+                return bytes(block)
+            return b''
+        finally:
+            await stream.close()
+
+    offsets = iter(range(start - start % STREAM_PART, end + 1, STREAM_PART))
+    pending = deque()
+    try:
+        while True:
+            while len(pending) < STREAM_PARALLEL:
+                offset = next(offsets, None)
+                if offset is None:
+                    break
+                pending.append((offset, asyncio.ensure_future(part(offset))))
+            if not pending:
+                break
+            offset, task = pending.popleft()
+            block = await task
+            portion = block[max(start, offset) - offset:end + 1 - offset]
+            if not portion:
+                break
+            yield portion
+    finally:
+        for _, task in pending:
+            task.cancel()
+
+
+def local_bytes(path, start, end):
+    with open(path, 'rb') as handle:
+        handle.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            block = handle.read(min(1024 * 1024, remaining))
+            if not block:
+                break
+            remaining -= len(block)
+            yield block
+
+
 async def media_response(lesson_id, request, only_head=False):
-    tg,message,lesson = await telegram_asset(lesson_id)
-    total = int(message.document.size or 0)
+    path = media_path(lesson_id)
+    if path.exists():  # aula baixada: toca do disco, sem depender do Telegram
+        lesson, tg, message = source_asset(lesson_id), None, None
+        total = path.stat().st_size
+    else:
+        tg,message,lesson = await telegram_asset(lesson_id)
+        total = int(message.document.size or 0)
     if total <= 0:
         raise HTTPException(404,'Mídia sem tamanho válido')
     start,end,partial = range_of(request.headers.get('range'),total)
@@ -521,23 +761,8 @@ async def media_response(lesson_id, request, only_head=False):
     status_code = 206 if partial else 200
     if only_head:
         return Response(status_code=status_code,headers=headers,media_type=lesson['mime_type'])
-
-    async def chunks():
-        remaining = end-start+1
-        stream = tg.iter_download(message.media,offset=start,chunk_size=256*1024,
-                                  request_size=512*1024,file_size=total)
-        try:
-            async for block in stream:
-                if remaining <= 0:
-                    break
-                portion = block[:remaining]
-                if portion:
-                    yield bytes(portion)
-                    remaining -= len(portion)
-        finally:
-            await stream.close()
-
-    return StreamingResponse(chunks(),status_code=status_code,media_type=lesson['mime_type'],headers=headers)
+    body = local_bytes(path,start,end) if tg is None else telegram_bytes(tg,message,start,end,total)
+    return StreamingResponse(body,status_code=status_code,media_type=lesson['mime_type'],headers=headers)
 
 
 @app.get('/api/lessons/{lesson_id}/stream')

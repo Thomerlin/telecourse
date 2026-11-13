@@ -103,10 +103,20 @@ def connect():
         connection.close()
 
 
+# SCHEMA é a versão 1 e não deve mais ser alterado: mudanças de esquema entram aqui,
+# um script SQL por versão (MIGRATIONS[0] leva o banco da versão 1 para a 2, e assim por diante).
+MIGRATIONS = []
+
+
 def initialize():
     with connect() as db:
         db.executescript(SCHEMA)
         db.execute('PRAGMA journal_mode=WAL')
+        version = max(1, db.execute('PRAGMA user_version').fetchone()[0])
+        for target, script in enumerate(MIGRATIONS, start=2):
+            if version < target:
+                db.executescript(script)
+        db.execute(f'PRAGMA user_version={len(MIGRATIONS) + 1}')
 
 
 def backup_database(keep=14) -> Path:

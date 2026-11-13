@@ -3,55 +3,88 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#0b0e14">
+  <meta name="theme-color" content="#0a0a0f">
   <title>TeleCourse — Seu cinema de cursos</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script defer src="/static/app.js"></script>
 </head>
 <body>
-  <aside class="sidebar">
+  <header class="nav" id="nav">
     <div class="brand"><span class="brand-icon">▶</span><strong>tele<span>course</span></strong></div>
-    <p class="sidebar-label">MINHA ÁREA</p>
-    <button class="nav-item active" id="nav-library">▦ <span>Biblioteca</span></button>
-    <button class="nav-item" id="nav-continue">◷ <span>Continuar estudando</span></button>
-    <div class="sidebar-bottom">
-      <div class="connection"><span class="dot" id="connection-dot"></span><span id="connection-name">Verificando Telegram...</span></div>
-      <p>Vídeos continuam no Telegram. Biblioteca e progresso ficam no seu computador.</p>
-      <div class="sidebar-actions"><button class="nav-item" id="make-backup">⇩ <span>Fazer backup</span></button><button class="nav-item" id="export-progress">↗ <span>Exportar progresso</span></button></div>
+    <nav class="nav-links" aria-label="Seções">
+      <button class="nav-item active" id="nav-library">Início</button>
+      <button class="nav-item" id="nav-continue">Continuar assistindo</button>
+      <button class="nav-item" id="nav-downloads">Downloads</button>
+    </nav>
+    <div class="nav-right">
+      <input id="course-search" class="search" type="search" autocomplete="off" placeholder="Buscar cursos…" aria-label="Buscar cursos">
+      <div class="connection" title="Vídeos ficam no Telegram; biblioteca, progresso e downloads ficam no seu computador."><span class="dot" id="connection-dot"></span><span id="connection-name">Verificando Telegram…</span></div>
+      <button class="primary" id="import-open">＋ Importar</button>
+      <details class="menu">
+        <summary aria-label="Mais opções">⋯</summary>
+        <div class="menu-list">
+          <button id="make-backup">⇩ Fazer backup</button>
+          <button id="export-progress">↗ Exportar progresso</button>
+        </div>
+      </details>
     </div>
-  </aside>
+  </header>
+
+  <div id="alert" class="alert hidden" role="alert" title="Clique para fechar"></div>
+
   <main>
-    <header class="topbar">
-      <div class="top-left"><span class="eyebrow">BIBLIOTECA PESSOAL · LOCAL</span><h1 id="main-heading">O que vamos aprender hoje?</h1></div>
-      <button class="primary" id="import-open">＋ Importar aulas</button>
-    </header>
-    <div id="alert" class="alert hidden" role="alert"></div>
     <section id="home-view">
-      <div class="hero">
-        <div class="hero-copy"><span class="hero-pill">ESTUDE NO SEU RITMO</span><h2>Seus cursos.<br><em>Na ordem certa.</em></h2><p>Transforme canais e grupos privados do Telegram em trilhas de aprendizado. Retome exatamente de onde parou.</p><button class="primary" id="hero-import">Adicionar meu primeiro curso →</button></div>
-        <div class="hero-art"><span class="floating f1">01 <small>Módulo</small></span><span class="floating f2">✓ <small>Concluído</small></span><div class="orb">▶</div><span class="floating f3">90% <small>Assistido</small></span></div>
-      </div>
-      <div class="section-heading"><h2>Continue de onde parou</h2><span id="resume-count">0 em andamento</span></div>
-      <div id="resume-grid" class="course-grid"></div>
-      <div id="library-heading" class="section-heading"><h2>Minha biblioteca</h2><span id="course-count">0 cursos</span></div>
-      <div class="search-box"><input id="course-search" type="search" autocomplete="off" placeholder="Buscar cursos na biblioteca…" aria-label="Buscar cursos"></div>
-      <div id="courses-grid" class="course-grid"></div>
+      <div class="billboard" id="billboard"></div>
+      <section class="row" id="resume-row">
+        <div class="section-heading"><h2>Continuar assistindo</h2><span id="resume-count"></span></div>
+        <div id="resume-grid" class="course-row"></div>
+      </section>
+      <section class="row" id="downloads-row">
+        <div class="section-heading"><h2>Baixados neste computador</h2><span id="downloads-count"></span></div>
+        <div id="downloads-grid" class="course-row"></div>
+      </section>
+      <section class="row" id="library-row">
+        <div class="section-heading"><h2>Minha biblioteca</h2><span id="course-count"></span></div>
+        <div id="courses-grid" class="course-grid"></div>
+      </section>
     </section>
+
     <section id="course-view" class="hidden">
       <button id="back-to-library" class="back">← Voltar à biblioteca</button>
-      <div class="course-header">
-        <div><span class="eyebrow">MINHA TRILHA</span><h2 id="course-title"></h2><p id="course-description"></p><div class="inline-tools"><button class="link-button" id="edit-course">Editar curso</button><button class="link-button" id="add-module">+ Novo módulo</button><button class="link-button" id="import-into-course">+ Importar mais aulas</button><button class="link-button danger" id="delete-course">Excluir da biblioteca</button></div></div>
-        <div class="course-progress"><strong id="course-progress-pct">0%</strong><span>concluído</span><div class="progress-track"><div id="course-progress-fill" class="progress-fill"></div></div></div>
-      </div>
       <div class="learning-layout">
         <div class="watch-pane">
           <div id="media-container" class="video-shell"><div class="player-empty"><span>▶</span><p>Selecione uma aula</p></div></div>
-          <div class="watch-meta"><span id="now-playing-type" class="eyebrow">ASSISTINDO AGORA</span><h3 id="now-playing-title">Selecione uma aula</h3>
-            <div class="watch-actions"><button class="secondary" id="mark-done">✓ Marcar concluída</button><button class="secondary" id="next-lesson">Próxima aula →</button></div>
+          <div class="watch-meta">
+            <span id="now-playing-type" class="eyebrow">ASSISTINDO AGORA</span>
+            <h3 id="now-playing-title">Selecione uma aula</h3>
+            <div class="watch-actions">
+              <button class="secondary" id="mark-done">✓ Marcar concluída</button>
+              <button class="secondary" id="next-lesson">Próxima aula →</button>
+            </div>
           </div>
-          <p class="small-hint">O progresso é salvo localmente a cada poucos segundos. Alguns formatos precisam de conversão para MP4/H.264 para tocar no navegador.</p>
+          <div class="course-header">
+            <div class="course-info">
+              <span class="eyebrow">CURSO</span>
+              <h2 id="course-title"></h2>
+              <p id="course-description"></p>
+              <p id="download-summary" class="download-summary"></p>
+            </div>
+            <div class="course-progress"><strong id="course-progress-pct">0%</strong><span>concluído</span><div class="progress-track"><div id="course-progress-fill" class="progress-fill"></div></div></div>
+          </div>
+          <div class="inline-tools">
+            <button class="chip" id="download-course">⇩ Baixar curso</button>
+            <button class="chip" id="remove-downloads">Remover downloads</button>
+            <button class="chip" id="import-into-course">＋ Importar mais aulas</button>
+            <button class="chip" id="add-module">＋ Novo módulo</button>
+            <button class="chip" id="edit-course">✎ Editar curso</button>
+            <button class="chip danger" id="delete-course">Excluir da biblioteca</button>
+          </div>
+          <p class="small-hint">O progresso é salvo localmente a cada poucos segundos. Aulas baixadas tocam sem internet. Alguns formatos precisam de conversão para MP4/H.264 para tocar no navegador.</p>
         </div>
-        <div class="playlist-pane"><div class="playlist-header"><div><h3>Conteúdo do curso</h3><small>Arraste aulas para mudar a ordem, ou use ↑ ↓.</small></div><span id="playlist-count">0 aulas</span></div><div id="playlist"></div></div>
+        <div class="playlist-pane">
+          <div class="playlist-header"><div><h3>Aulas</h3><small>Arraste para mudar a ordem, ou use ↑ ↓.</small></div><span id="playlist-count">0 aulas</span></div>
+          <div id="playlist"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -60,7 +93,7 @@
     <div class="modal-head"><div><span class="eyebrow">ASSISTENTE DE IMPORTAÇÃO</span><h2 id="wizard-title">Escolher origem</h2></div><button type="button" class="icon-btn" id="close-modal" aria-label="Fechar">✕</button></div>
     <div class="wizard-steps"><span id="step-one" class="step active">1 · Canal</span><span id="step-two" class="step">2 · Revisão</span></div>
     <section id="wizard-source">
-      <p>Conecte-se à sua própria conta no terminal e escolha um canal ou grupo. Só analisamos metadados; os vídeos não serão baixados durante a importação.</p>
+      <p>Escolha um canal ou grupo da sua conta. Só analisamos metadados; os vídeos não são baixados durante a importação.</p>
       <form id="scan-form">
         <label for="chat-select">Canal ou grupo privado</label><select id="chat-select" required><option value="">Carregando conversas...</option></select>
         <label for="scan-limit">Mensagens recentes para analisar</label><input type="number" id="scan-limit" value="600" min="1" max="3000" required>

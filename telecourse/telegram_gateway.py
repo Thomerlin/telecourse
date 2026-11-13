@@ -28,9 +28,18 @@ class Gateway:
         if self.client:
             await self.client.disconnect()
 
+    async def ensure_connected(self):
+        """Reconecta sob demanda, para o servidor não precisar reiniciar após queda de rede."""
+        if self.client and not self.client.is_connected():
+            try:
+                await self.client.connect()
+            except (OSError, TimeoutError, ConnectionError) as exc:
+                raise HTTPException(503, 'Sem conexão com o Telegram; verifique a rede e tente novamente') from exc
+
     async def authorized(self):
         if not self.client:
             raise HTTPException(503, 'Preencha API_ID/API_HASH no .env e instale as dependências')
+        await self.ensure_connected()
         if not await self.client.is_user_authorized():
             raise HTTPException(401, 'Execute python login.py no terminal para conectar sua conta')
         return self.client
@@ -41,7 +50,7 @@ class Gateway:
         async for item in client.iter_dialogs(limit=500):
             if not (item.is_channel or item.is_group):
                 continue
-            protected = bool(getattr(item.entity, 'noforwards', False))
+            protected = not settings.ALLOW_PROTECTED and bool(getattr(item.entity, 'noforwards', False))
             output.append({'chat_id': int(item.id), 'title': item.name or 'Sem título',
                            'kind': 'Canal' if item.is_channel else 'Grupo', 'protected': protected})
         return output
@@ -52,7 +61,7 @@ class Gateway:
             entity = await client.get_entity(chat_id)
         except (ValueError, TypeError) as exc:
             raise HTTPException(404, 'Conversa não encontrada: abra o canal no Telegram primeiro') from exc
-        if getattr(entity, 'noforwards', False):
+        if not settings.ALLOW_PROTECTED and getattr(entity, 'noforwards', False):
             raise HTTPException(403, 'O canal ou grupo protege seu conteúdo contra cópia')
         return entity
 
